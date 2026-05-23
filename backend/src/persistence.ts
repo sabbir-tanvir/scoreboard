@@ -57,6 +57,23 @@ export async function savePersistedScoreboardState(
   );
 }
 
+export async function resetPersistedScoreboardState(): Promise<void> {
+  const collection = await getCollection();
+  if (!collection) {
+    return;
+  }
+
+  await collection.updateOne(
+    { _id: DOCUMENT_ID },
+    {
+      $set: {
+        state: createInitialScoreboardState(),
+      },
+    },
+    { upsert: true },
+  );
+}
+
 export async function closePersistence(): Promise<void> {
   await mongoClient?.close();
   mongoClient = null;

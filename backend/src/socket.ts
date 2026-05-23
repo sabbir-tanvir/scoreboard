@@ -1,5 +1,5 @@
 import type { Server } from "socket.io";
-import { getOrCreateMatch } from "./matchStore.js";
+import { getOrCreateMatch } from "./services/matchService.js";
 
 export function registerSocketHandlers(io: Server) {
   io.on("connection", (socket) => {

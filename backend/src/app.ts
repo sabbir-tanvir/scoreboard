@@ -2,19 +2,17 @@ import express from "express";
 import cors from "cors";
 import { ADMIN_EMAIL, ADMIN_PASSWORD, CLIENT_ORIGIN } from "./config/env.js";
 import { createAdminToken, getBearerToken, verifyAdminToken } from "./auth.js";
-import { type ScoreAction, type ScoreboardState } from "./scoreboardState.js";
+import { type ScoreboardState } from "./scoreboardState.js";
 import {
   createMatch,
+  deleteMatch,
   finishMatch,
   getMatch,
   getOrCreateMatch,
-  listMatchSummaries,
-  loadPersistedScoreboardState,
-  savePersistedScoreboardState,
+  listMatches,
   updateMatchAction,
   updateMatchSettings,
   type MatchRecord,
-  type MatchSummary,
 } from "./matchStore.js";
 
 type LoginBody = {
@@ -47,6 +45,7 @@ type CreateMatchBody = {
 
 type AppOptions = {
   onMatchUpdated?: (match: MatchRecord, message: string) => void;
+  onMatchesChanged?: () => void;
 };
 
 export function createApp(options: AppOptions = {}) {
@@ -64,7 +63,7 @@ export function createApp(options: AppOptions = {}) {
   });
 
   app.get("/matches", async (_request, response) => {
-    const matches = await listMatchSummaries();
+    const matches = await listMatches();
     response.json({ matches });
   });
 
@@ -148,6 +147,7 @@ export function createApp(options: AppOptions = {}) {
         sport: body.sport as ScoreboardState["sport"] | undefined,
       });
       options.onMatchUpdated?.(match, "Match created");
+      options.onMatchesChanged?.();
       response.status(201).json({ ok: true, match });
     } catch (error) {
       const message =
@@ -190,6 +190,7 @@ export function createApp(options: AppOptions = {}) {
     const roomId = String((request.body as UpdateBody).roomId ?? "default");
     const match = await updateMatchAction(roomId, action);
     options.onMatchUpdated?.(match, `Score updated: ${match.matchName}`);
+    options.onMatchesChanged?.();
     response.json({ ok: true, match });
   });
 
@@ -230,6 +231,7 @@ export function createApp(options: AppOptions = {}) {
       match,
       `Scoreboard settings updated: ${match.matchName}`,
     );
+    options.onMatchesChanged?.();
     response.json({ ok: true, match });
   });
 
@@ -248,7 +250,38 @@ export function createApp(options: AppOptions = {}) {
 
     const match = await finishMatch(request.params.roomId);
     options.onMatchUpdated?.(match, `Match finished: ${match.matchName}`);
+    options.onMatchesChanged?.();
     response.json({ ok: true, match });
+  });
+
+  app.delete("/matches/:roomId", async (request, response) => {
+    const bearerToken = getBearerToken(request.header("authorization"));
+    if (!bearerToken) {
+      response.status(401).json({ error: "Missing Bearer token" });
+      return;
+    }
+
+    const payload = verifyAdminToken(bearerToken);
+    if (!payload) {
+      response.status(401).json({ error: "Invalid or expired token" });
+      return;
+    }
+
+    const roomId = request.params.roomId;
+    const match = await getMatch(roomId);
+    if (!match) {
+      response.status(404).json({ error: "Match not found" });
+      return;
+    }
+
+    const deleted = await deleteMatch(roomId);
+    if (!deleted) {
+      response.status(404).json({ error: "Match not found" });
+      return;
+    }
+
+    options.onMatchesChanged?.();
+    response.json({ ok: true, roomId });
   });
 
   return app;

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ScoreboardView } from "../components/ScoreboardView";
 import { listMatches } from "../lib/api";
 import { navigateTo } from "../lib/navigation";
+import { socket } from "../lib/socket";
 import { useSocketScoreboard } from "../hooks/useSocketScoreboard";
 import { useScoreboardStore } from "../store/useScoreboardStore";
 import type { MatchSummary } from "../types/scoreboard";
@@ -30,6 +31,19 @@ export function LivePage() {
       .then((response) => setMatches(response.matches))
       .catch(() => setMatches([]));
   }, [roomId]);
+
+  useEffect(() => {
+    const onMatchesUpdated = () => {
+      void listMatches()
+        .then((response) => setMatches(response.matches))
+        .catch(() => setMatches([]));
+    };
+
+    socket.on("matches:updated", onMatchesUpdated);
+    return () => {
+      socket.off("matches:updated", onMatchesUpdated);
+    };
+  }, []);
 
   const connected = useScoreboardStore((state) => state.connected);
   const lastEvent = useScoreboardStore((state) => state.lastEvent);

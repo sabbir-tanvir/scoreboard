@@ -2,7 +2,7 @@ import http from "node:http";
 import { Server } from "socket.io";
 import { createApp } from "./app.js";
 import { CLIENT_ORIGIN, PORT } from "./config/env.js";
-import { closeMatchStore } from "./matchStore.js";
+import { closeMatchStore } from "./services/matchService.js";
 import { registerSocketHandlers } from "./socket.js";
 
 async function startServer() {
@@ -12,6 +12,9 @@ async function startServer() {
     onMatchUpdated: (match, message) => {
       io.to(match.roomId).emit("scoreboard:state", match.state);
       io.to(match.roomId).emit("scoreboard:message", message);
+    },
+    onMatchesChanged: () => {
+      io.emit("matches:updated");
     },
   });
   const server = http.createServer(app);

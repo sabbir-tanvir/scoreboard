@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { clearAdminToken, getAdminToken } from "../lib/adminSession";
-import { createMatch, listMatches } from "../lib/api";
+import { createMatch, deleteMatch, listMatches } from "../lib/api";
 import { navigateTo } from "../lib/navigation";
+import { socket } from "../lib/socket";
 import type { MatchSummary, Sport } from "../types/scoreboard";
 
 type CreateFormState = {
@@ -26,6 +27,7 @@ export function AdminMatchBrowserPage() {
     useState<CreateFormState>(initialCreateForm);
   const [isCreating, setIsCreating] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [deletingRoomId, setDeletingRoomId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
 
   const token = getAdminToken();
@@ -53,6 +55,20 @@ export function AdminMatchBrowserPage() {
 
   useEffect(() => {
     void refreshMatches();
+  }, []);
+
+  useEffect(() => {
+    socket.connect();
+
+    const onMatchesUpdated = () => {
+      void refreshMatches();
+    };
+
+    socket.on("matches:updated", onMatchesUpdated);
+    return () => {
+      socket.off("matches:updated", onMatchesUpdated);
+      socket.disconnect();
+    };
   }, []);
 
   const ongoingMatches = useMemo(
@@ -111,6 +127,26 @@ export function AdminMatchBrowserPage() {
   const handleLogout = () => {
     clearAdminToken();
     navigateTo("/admin/login");
+  };
+
+  const handleDeleteMatch = async (roomId: string, matchName: string) => {
+    const confirmed = window.confirm(
+      `Delete ${matchName}? This will remove the match from history.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setDeletingRoomId(roomId);
+      await deleteMatch(roomId, token);
+      setMessage(`Deleted ${matchName}`);
+      await refreshMatches();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Delete failed");
+    } finally {
+      setDeletingRoomId((current) => (current === roomId ? null : current));
+    }
   };
 
   return (
@@ -237,38 +273,46 @@ export function AdminMatchBrowserPage() {
             <PaginatedMatchGroup
               title="Ongoing football"
               matches={grouped.ongoingFootball}
+              deletingRoomId={deletingRoomId}
               onSelect={(roomId) =>
                 navigateTo(
                   `/admin/controller?roomId=${encodeURIComponent(roomId)}`,
                 )
               }
+              onDelete={handleDeleteMatch}
             />
             <PaginatedMatchGroup
               title="Ongoing cricket"
               matches={grouped.ongoingCricket}
+              deletingRoomId={deletingRoomId}
               onSelect={(roomId) =>
                 navigateTo(
                   `/admin/controller?roomId=${encodeURIComponent(roomId)}`,
                 )
               }
+              onDelete={handleDeleteMatch}
             />
             <PaginatedMatchGroup
               title="Previous football"
               matches={grouped.previousFootball}
+              deletingRoomId={deletingRoomId}
               onSelect={(roomId) =>
                 navigateTo(
                   `/admin/controller?roomId=${encodeURIComponent(roomId)}`,
                 )
               }
+              onDelete={handleDeleteMatch}
             />
             <PaginatedMatchGroup
               title="Previous cricket"
               matches={grouped.previousCricket}
+              deletingRoomId={deletingRoomId}
               onSelect={(roomId) =>
                 navigateTo(
                   `/admin/controller?roomId=${encodeURIComponent(roomId)}`,
                 )
               }
+              onDelete={handleDeleteMatch}
             />
           </section>
         </section>
@@ -305,10 +349,14 @@ function PaginatedMatchGroup({
   title,
   matches,
   onSelect,
+  onDelete,
+  deletingRoomId,
 }: {
   title: string;
   matches: MatchSummary[];
   onSelect: (roomId: string) => void;
+  onDelete: (roomId: string, matchName: string) => void;
+  deletingRoomId: string | null;
 }) {
   const pageSize = 4;
   const [page, setPage] = useState(1);
@@ -357,24 +405,43 @@ function PaginatedMatchGroup({
       <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {pageItems.length > 0 ? (
           pageItems.map((match) => (
-            <button
+            <div
               key={match.roomId}
-              onClick={() => onSelect(match.roomId)}
-              className="rounded-2xl border border-white/10 bg-slate-950/70 p-4 text-left transition hover:border-cyan-400/60 hover:bg-white/10"
+              className="rounded-2xl border border-white/10 bg-slate-950/70 p-4 transition hover:border-cyan-400/60 hover:bg-white/10"
             >
-              <span className="block text-sm font-semibold text-white">
-                {match.matchName}
-              </span>
-              <span className="mt-1 block text-xs uppercase tracking-[0.2em] text-slate-400">
-                {match.sport}
-              </span>
-              <span className="mt-2 block text-xs text-slate-400">
-                {new Date(match.updatedAt).toLocaleString()}
-              </span>
-              <span className="mt-2 block text-xs text-slate-500">
-                {match.roomId}
-              </span>
-            </button>
+              <button
+                onClick={() => onSelect(match.roomId)}
+                className="w-full text-left"
+              >
+                <span className="block text-sm font-semibold text-white">
+                  {match.matchName}
+                </span>
+                <span className="mt-1 block text-xs uppercase tracking-[0.2em] text-slate-400">
+                  {match.sport}
+                </span>
+                <span className="mt-2 block text-xs text-slate-400">
+                  {new Date(match.updatedAt).toLocaleString()}
+                </span>
+                <span className="mt-2 block text-xs text-slate-500">
+                  {match.roomId}
+                </span>
+              </button>
+              <div className="mt-4 flex items-center justify-between gap-3">
+                <button
+                  onClick={() => onSelect(match.roomId)}
+                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-semibold text-white transition hover:bg-white/10"
+                >
+                  Open
+                </button>
+                <button
+                  onClick={() => void onDelete(match.roomId, match.matchName)}
+                  disabled={deletingRoomId === match.roomId}
+                  className="rounded-full border border-rose-400/40 bg-rose-500/10 px-4 py-2 text-xs font-semibold text-rose-100 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {deletingRoomId === match.roomId ? "Deleting..." : "Delete"}
+                </button>
+              </div>
+            </div>
           ))
         ) : (
           <p className="text-sm text-slate-400">No matches in this group.</p>

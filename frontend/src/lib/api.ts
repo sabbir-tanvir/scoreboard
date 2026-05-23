@@ -82,6 +82,27 @@ export async function finishMatch(roomId: string, token: string) {
   }>;
 }
 
+export async function deleteMatch(roomId: string, token: string) {
+  const response = await fetch(
+    `${apiBaseUrl}/matches/${encodeURIComponent(roomId)}`,
+    {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    },
+  );
+
+  if (!response.ok) {
+    const errorBody = (await response
+      .json()
+      .catch(() => ({ error: "Request failed" }))) as { error?: string };
+    throw new Error(errorBody.error ?? "Request failed");
+  }
+
+  return response.json() as Promise<{ ok: true; roomId: string }>;
+}
+
 export async function loginAdmin(email: string, password: string) {
   const response = await fetch(`${apiBaseUrl}/auth/login`, {
     method: "POST",

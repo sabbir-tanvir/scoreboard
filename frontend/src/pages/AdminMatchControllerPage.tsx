@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useSocketScoreboard } from "../hooks/useSocketScoreboard";
 import { clearAdminToken, getAdminToken } from "../lib/adminSession";
 import { navigateTo } from "../lib/navigation";
-import { updateScore } from "../lib/api";
+import { finishMatch, updateScore, updateSettings } from "../lib/api";
 import { useScoreboardStore } from "../store/useScoreboardStore";
 import type {
   CricketDeliveryEvent,
@@ -22,6 +22,9 @@ export function AdminMatchControllerPage() {
   const lastEvent = useScoreboardStore((state) => state.lastEvent);
   const scoreboard = useScoreboardStore((state) => state.scoreboard);
   const setLastEvent = useScoreboardStore((state) => state.setLastEvent);
+
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [isFinishingMatch, setIsFinishingMatch] = useState(false);
 
   const token = getAdminToken();
 
@@ -65,6 +68,50 @@ export function AdminMatchControllerPage() {
     navigateTo("/admin/dashboard");
   };
 
+  const handleToggleLiveEnabled = async () => {
+    try {
+      setIsSavingSettings(true);
+      const nextLiveEnabled = !scoreboard.liveEnabled;
+      await updateSettings(
+        {
+          roomId,
+          matchName: scoreboard.matchName,
+          homeTeam: scoreboard.homeTeam,
+          awayTeam: scoreboard.awayTeam,
+          liveEnabled: nextLiveEnabled,
+          sport: scoreboard.sport,
+        },
+        token,
+      );
+      setLastEvent(
+        nextLiveEnabled ? "Live page turned on" : "Live page hidden",
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Settings update failed";
+      setLastEvent(message);
+    } finally {
+      setIsSavingSettings(false);
+    }
+  };
+
+  const handleEndMatch = async () => {
+    try {
+      setIsFinishingMatch(true);
+      await finishMatch(roomId, token);
+      setLastEvent(`Match finished: ${scoreboard.matchName}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Finish failed";
+      setLastEvent(message);
+      if (message.toLowerCase().includes("token")) {
+        clearAdminToken();
+        navigateTo("/admin/login");
+      }
+    } finally {
+      setIsFinishingMatch(false);
+    }
+  };
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
       <section className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-8 px-6 py-10 lg:px-8">
@@ -81,6 +128,11 @@ export function AdminMatchControllerPage() {
               Connection: {connected ? "Connected" : "Disconnected"} • Last
               event: {lastEvent || "None"}
             </p>
+            <p className="mt-2 text-sm font-medium text-slate-300">
+              {scoreboard.sport === "football"
+                ? `Score: ${scoreboard.football.homeScore} - ${scoreboard.football.awayScore}`
+                : `Score: ${scoreboard.cricket.home.runs}/${scoreboard.cricket.home.wickets} vs ${scoreboard.cricket.away.runs}/${scoreboard.cricket.away.wickets}`}
+            </p>
           </div>
           <div className="flex flex-wrap gap-3">
             <button
@@ -95,10 +147,49 @@ export function AdminMatchControllerPage() {
             >
               Reset
             </button>
+            <button
+              onClick={() => void handleEndMatch()}
+              disabled={isFinishingMatch}
+              className="rounded-full border border-amber-400/40 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-200 transition hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isFinishingMatch ? "Ending..." : "End match"}
+            </button>
           </div>
         </header>
 
         <section className="rounded-3xl border border-white/10 bg-white/5 p-6">
+          <div className="mb-6 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-white/10 bg-slate-950/60 p-4">
+            <div>
+              <p className="text-sm font-medium text-slate-400">
+                Current state
+              </p>
+              <h2 className="text-2xl font-semibold">
+                {scoreboard.homeTeam}{" "}
+                {scoreboard.sport === "football"
+                  ? `${scoreboard.football.homeScore} - ${scoreboard.football.awayScore}`
+                  : `${scoreboard.cricket.home.runs}/${scoreboard.cricket.home.wickets} vs ${scoreboard.cricket.away.runs}/${scoreboard.cricket.away.wickets}`}
+              </h2>
+              <p className="text-sm text-slate-400">
+                Live page: {scoreboard.liveEnabled ? "On" : "Off"}
+              </p>
+            </div>
+            <button
+              onClick={() => void handleToggleLiveEnabled()}
+              disabled={isSavingSettings}
+              className={`rounded-full px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                scoreboard.liveEnabled
+                  ? "border border-emerald-400/40 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20"
+                  : "border border-cyan-400/40 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/20"
+              }`}
+            >
+              {isSavingSettings
+                ? "Saving..."
+                : scoreboard.liveEnabled
+                  ? "Hide live page"
+                  : "Show live page"}
+            </button>
+          </div>
+
           <div className="grid gap-4 sm:grid-cols-2">
             {scoreboard.sport === "football" ? (
               <>
