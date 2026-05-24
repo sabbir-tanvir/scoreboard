@@ -1,0 +1,532 @@
+# Scoreboard — Architecture Walkthrough
+
+A real-time live scoreboard system supporting **Football** and **Cricket**, built as a monorepo with a React frontend and an Express backend connected via Socket.IO for instant updates.
+
+---
+
+## High-Level Architecture
+
+```mermaid
+graph TB
+    subgraph Frontend["Frontend (React + Vite + TailwindCSS)"]
+        App["App.tsx — Pathname Router"]
+        LivePage["LivePage — Public Viewer"]
+        AdminLogin["AdminLoginPage"]
+        MatchBrowser["AdminMatchBrowserPage"]
+        MatchController["AdminMatchControllerPage"]
+        ZustandStore["Zustand Store"]
+        SocketHook["useSocketScoreboard Hook"]
+        ApiClient["lib/api.ts — REST Client"]
+        SocketClient["lib/socket.ts — Socket.IO Client"]
+    end
+
+    subgraph Backend["Backend (Express + TypeScript)"]
+        ExpressApp["app.ts — REST API"]
+        SocketServer["socket.ts — Socket.IO Server"]
+        AuthModule["auth.ts — JWT Auth"]
+        MatchService["matchService.ts — Business Logic"]
+        MatchRepo["matchRepository.ts — MongoDB CRUD"]
+        ScoreboardState["scoreboardState.ts — Pure Reducers"]
+        Persistence["persistence.ts — Legacy Collection"]
+    end
+
+    subgraph DB["Database"]
+        MongoDB["MongoDB Atlas"]
+    end
+
+    LivePage -->|"subscribes via"| SocketHook
+    SocketHook -->|"connects"| SocketClient
+    SocketClient <-->|"WebSocket"| SocketServer
+    SocketServer -->|"reads match"| MatchService
+
+    MatchController -->|"POST /scoreboard/update"| ApiClient
+    MatchBrowser -->|"POST /matches"| ApiClient
+    AdminLogin -->|"POST /auth/login"| ApiClient
+    ApiClient -->|"HTTP + JWT"| ExpressApp
+
+    ExpressApp -->|"delegates"| MatchService
+    ExpressApp -->|"verifies token"| AuthModule
+    MatchService -->|"applies actions"| ScoreboardState
+    MatchService -->|"persists"| MatchRepo
+    MatchRepo -->|"read/write"| MongoDB
+    MatchService -->|"legacy migration"| Persistence
+    Persistence -->|"read/write"| MongoDB
+
+    ExpressApp -->|"onMatchUpdated callback"| SocketServer
+    SocketServer -->|"emit scoreboard:state"| SocketClient
+    SocketClient -->|"updates"| ZustandStore
+    ZustandStore -->|"re-renders"| LivePage
+    ZustandStore -->|"re-renders"| MatchController
+```
+
+---
+
+## Tech Stack Summary
+
+| Layer                  | Technology            | Purpose                  |
+| ---------------------- | --------------------- | ------------------------ |
+| **Frontend Framework** | React 18 + TypeScript | UI components            |
+| **Build Tool**         | Vite 5                | Dev server + bundling    |
+| **Styling**            | TailwindCSS 3         | Utility-first CSS        |
+| **State Management**   | Zustand 4             | Global client-side state |
+| **Realtime Client**    | Socket.IO Client 4    | WebSocket connection     |
+| **Backend Framework**  | Express 4             | REST API server          |
+| **Realtime Server**    | Socket.IO 4           | WebSocket broadcast      |
+| **Authentication**     | JSON Web Tokens (JWT) | Admin-only write access  |
+| **Database**           | MongoDB 6 (Atlas)     | Persistent match storage |
+| **Language**           | TypeScript 5          | End-to-end type safety   |
+
+---
+
+## Project Structure
+
+```
+scoreboard/
+├── backend/
+│   ├── src/
+│   │   ├── index.ts              # Server bootstrap (HTTP + Socket.IO)
+│   │   ├── app.ts                # Express app factory with all REST routes
+│   │   ├── auth.ts               # JWT create/verify/parse helpers
+│   │   ├── socket.ts             # Socket.IO connection handler
+│   │   ├── scoreboardState.ts    # Pure state types + reducer functions
+│   │   ├── matchStore.ts         # Re-export barrel (facade for matchService)
+│   │   ├── persistence.ts        # Legacy single-document persistence
+│   │   ├── config/
+│   │   │   └── env.ts            # Environment variable loader
+│   │   ├── repositories/
+│   │   │   └── matchRepository.ts # MongoDB CRUD for matches collection
+│   │   └── services/
+│   │       └── matchService.ts   # Business logic layer
+│   ├── .env / .env.example
+│   ├── package.json
+│   └── tsconfig.json
+│
+├── frontend/
+│   ├── src/
+│   │   ├── main.tsx              # React DOM entry point
+│   │   ├── App.tsx               # Path-based router
+│   │   ├── index.css             # Global styles + Tailwind directives
+│   │   ├── components/
+│   │   │   ├── ScoreboardView.tsx    # Score display (football + cricket)
+│   │   │   └── ConnectionStatus.tsx  # WebSocket connection indicator
+│   │   ├── hooks/
+│   │   │   └── useSocketScoreboard.ts  # Socket.IO lifecycle hook
+│   │   ├── lib/
+│   │   │   ├── api.ts            # REST API client (all fetch calls)
+│   │   │   ├── socket.ts         # Socket.IO singleton instance
+│   │   │   ├── adminSession.ts   # localStorage token management
+│   │   │   └── navigation.ts     # pushState + popstate helper
+│   │   ├── pages/
+│   │   │   ├── LivePage.tsx              # Public live viewer
+│   │   │   ├── AdminLoginPage.tsx        # Login form
+│   │   │   ├── AdminMatchBrowserPage.tsx # Match list + create form
+│   │   │   ├── AdminMatchControllerPage.tsx # Score controller per match
+│   │   │   ├── AdminDashboardPage.tsx    # Combined browser + controller (legacy)
+│   │   │   └── AdminPage.tsx             # Original single-match admin (legacy)
+│   │   ├── store/
+│   │   │   └── useScoreboardStore.ts  # Zustand global store
+│   │   └── types/
+│   │       └── scoreboard.ts     # Shared TypeScript types
+│   ├── index.html
+│   ├── .env / .env.example
+│   ├── package.json
+│   ├── vite.config.ts
+│   └── tailwind.config.js
+│
+├── README.md
+└── scoreboard.code-workspace
+```
+
+---
+
+## Data Flow: How a Score Update Works
+
+This is the core flow that makes the app real-time:
+
+```mermaid
+sequenceDiagram
+    participant Admin as Admin Browser
+    participant API as Express REST API
+    participant Service as matchService
+    participant Reducer as scoreboardState
+    participant Repo as matchRepository
+    participant DB as MongoDB
+    participant IO as Socket.IO Server
+    participant Viewer as Public Viewer Browser
+
+    Admin->>API: POST /scoreboard/update {action, roomId, JWT}
+    API->>API: Verify JWT (auth.ts)
+    API->>Service: updateMatchAction(roomId, action)
+    Service->>Service: getOrCreateMatch(roomId)
+    Service->>Reducer: applyScoreActionToState(state, action)
+    Reducer-->>Service: newState
+    Service->>Repo: saveMatchRecord(record)
+    Repo->>DB: updateOne (upsert)
+    Service-->>API: updatedMatchRecord
+    API->>IO: onMatchUpdated callback
+    IO->>IO: io.to(roomId).emit("scoreboard:state", state)
+    IO->>IO: io.to(roomId).emit("scoreboard:message", msg)
+    IO->>IO: io.emit("matches:updated")
+    IO-->>Viewer: scoreboard:state event
+    Viewer->>Viewer: Zustand store updates → React re-renders
+    API-->>Admin: 200 {ok: true, match}
+```
+
+---
+
+## Backend Architecture
+
+### Entry Point — [index.ts](file:///media/rumon/PLANT/nivrosys/scoreboard/backend/src/index.ts)
+
+Bootstraps the server:
+
+1. Creates the Express app via `createApp()` with **callback hooks** for `onMatchUpdated` and `onMatchesChanged`
+2. Wraps Express in a Node `http.Server`
+3. Creates a `Socket.IO Server` attached to the HTTP server
+4. Registers socket connection handlers
+5. Starts listening on the configured port
+6. Handles graceful shutdown (SIGINT/SIGTERM)
+
+> [!IMPORTANT]
+> The callback pattern (`onMatchUpdated`, `onMatchesChanged`) is how the REST layer communicates with the Socket.IO layer — they're decoupled so `app.ts` has no direct dependency on Socket.IO.
+
+---
+
+### REST API — [app.ts](file:///media/rumon/PLANT/nivrosys/scoreboard/backend/src/app.ts)
+
+All routes are defined in a single `createApp()` factory function:
+
+| Method   | Route                     | Auth | Description                                             |
+| -------- | ------------------------- | ---- | ------------------------------------------------------- |
+| `GET`    | `/health`                 | ❌   | Health check                                            |
+| `GET`    | `/matches`                | ❌   | List all match summaries                                |
+| `GET`    | `/matches/:roomId`        | ❌   | Get a single match by room ID                           |
+| `GET`    | `/scoreboard`             | ❌   | Get scoreboard state for a room (`?roomId=`)            |
+| `GET`    | `/scoreboard/export`      | ✅   | Export match data as JSON backup                        |
+| `POST`   | `/auth/login`             | ❌   | Admin login → returns JWT                               |
+| `POST`   | `/matches`                | ✅   | Create a new match room                                 |
+| `POST`   | `/scoreboard/update`      | ✅   | Apply a score action to a match                         |
+| `POST`   | `/scoreboard/settings`    | ✅   | Update match settings (name, teams, sport, live toggle) |
+| `POST`   | `/matches/:roomId/finish` | ✅   | Mark a match as finished                                |
+| `DELETE` | `/matches/:roomId`        | ✅   | Delete a match permanently                              |
+
+> [!NOTE]
+> Auth is simple: email + password are checked against env vars. On success, a JWT is issued. All write endpoints require `Authorization: Bearer <token>`.
+
+---
+
+### Authentication — [auth.ts](file:///media/rumon/PLANT/nivrosys/scoreboard/backend/src/auth.ts)
+
+- **Single admin account** — credentials defined in environment variables (`ADMIN_EMAIL`, `ADMIN_PASSWORD`)
+- JWT payload: `{ email: string, role: "admin" }`
+- Token expires based on `JWT_EXPIRES_IN` (default: `1d`)
+- `getBearerToken()` extracts token from `Authorization` header
+- `verifyAdminToken()` validates and decodes the JWT
+
+---
+
+### State Reducer — [scoreboardState.ts](file:///media/rumon/PLANT/nivrosys/scoreboard/backend/src/scoreboardState.ts)
+
+This is the **pure business logic** — no I/O, no side effects. Contains:
+
+#### Types
+
+- **`ScoreboardState`** — the full state object with `roomId`, `matchName`, `sport`, team names, football scores, cricket state, and `liveEnabled` toggle
+- **`FootballState`** — `{ homeScore, awayScore }`
+- **`CricketTeamState`** — `{ runs, wickets, overs, legalBalls, currentOver[], overHistory[] }`
+- **`FootballAction`** / **`CricketAction`** — discriminated union action types
+
+#### Key Functions
+
+| Function                                 | Purpose                                                                                      |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `createInitialScoreboardState()`         | Factory for a fresh default state                                                            |
+| `cloneScoreboardState()`                 | Deep clone (immutable pattern)                                                               |
+| `applyScoreActionToState(state, action)` | **Core reducer** — handles football +1/-1, cricket deliveries, resets                        |
+| `updateScoreboardSettingsOnState()`      | Update team names, sport, live toggle                                                        |
+| `applyCricketDelivery()`                 | Cricket-specific logic: runs from delivery events, wickets, no-balls, wides, over boundaries |
+
+#### Cricket Delivery Logic
+
+```
+Event "0"           → dot ball (0 runs, +1 legal ball)
+Event "1","2","3","4","6" → runs scored (+1 legal ball)
+Event "W"           → wicket (max 10, +1 legal ball)
+Event "NB"          → no ball (+1 run, NOT a legal ball)
+Event "WD"          → wide (+1 run, NOT a legal ball)
+
+Every 6 legal balls → over completes, currentOver pushed to overHistory
+```
+
+---
+
+### Service Layer — [matchService.ts](file:///media/rumon/PLANT/nivrosys/scoreboard/backend/src/services/matchService.ts)
+
+The business orchestration layer between the API and the repository:
+
+| Function                                | What it Does                                                                         |
+| --------------------------------------- | ------------------------------------------------------------------------------------ |
+| `createMatch(input)`                    | Validates, generates a slug-based `roomId`, creates initial state, persists          |
+| `listMatches()`                         | Lists all match summaries (triggers legacy migration if needed)                      |
+| `getMatch(roomId)`                      | Returns a single match record                                                        |
+| `getOrCreateMatch(roomId)`              | Get-or-create pattern — ensures a match always exists                                |
+| `updateMatchAction(roomId, action)`     | Loads match → applies reducer → saves back                                           |
+| `updateMatchSettings(roomId, settings)` | Updates team names, sport type, live toggle                                          |
+| `finishMatch(roomId)`                   | Sets `status: "finished"` and `finishedAt` timestamp                                 |
+| `deleteMatch(roomId)`                   | Permanently removes from DB                                                          |
+| `migrateLegacyMatchIfNeeded()`          | One-time migration from the old single-doc persistence to the new multi-match system |
+
+> [!TIP]
+> Room IDs are auto-generated as `slugified-match-name-<8-char-uuid>`, e.g. `weekend-final-a1b2c3d4`.
+
+---
+
+### Repository Layer — [matchRepository.ts](file:///media/rumon/PLANT/nivrosys/scoreboard/backend/src/repositories/matchRepository.ts)
+
+Direct MongoDB CRUD operations on the `matches` collection:
+
+| Function                    | MongoDB Operation                                        |
+| --------------------------- | -------------------------------------------------------- |
+| `listMatchRecords()`        | `find({}).sort({ updatedAt: -1 })`                       |
+| `listMatchSummaries()`      | Maps full records to summary projections                 |
+| `getMatchRecord(roomId)`    | `findOne({ _id: roomId })`                               |
+| `saveMatchRecord(record)`   | `updateOne({ _id }, { $set: record }, { upsert: true })` |
+| `deleteMatchRecord(roomId)` | `deleteOne({ _id: roomId })`                             |
+
+> [!NOTE]
+> The `_id` field IS the `roomId` — matches are keyed by their room identifier.
+
+---
+
+### Legacy Persistence — [persistence.ts](file:///media/rumon/PLANT/nivrosys/scoreboard/backend/src/persistence.ts)
+
+The original single-match persistence layer (collection: `scoreboard_state`, document ID: `current`). Kept for **backwards-compatible migration** — if the new `matches` collection is empty but the legacy document has data, `matchService` automatically migrates it.
+
+---
+
+### Socket.IO Server — [socket.ts](file:///media/rumon/PLANT/nivrosys/scoreboard/backend/src/socket.ts)
+
+On client connection:
+
+1. Reads `roomId` from `socket.handshake.auth`
+2. Joins the client to the Socket.IO room for that `roomId`
+3. Immediately emits the current match state and a welcome message
+
+#### Event Map
+
+| Direction       | Event                | Payload           | Description                   |
+| --------------- | -------------------- | ----------------- | ----------------------------- |
+| Server → Client | `scoreboard:state`   | `ScoreboardState` | Full scoreboard state push    |
+| Server → Client | `scoreboard:message` | `string`          | Human-readable status message |
+| Server → All    | `matches:updated`    | _(none)_          | Signal to refresh match lists |
+
+> [!IMPORTANT]
+> Score updates are **NOT** sent via WebSocket from client to server. The admin sends updates via HTTP REST, and the server broadcasts to all Socket.IO subscribers via the `onMatchUpdated` callback. This is a **server-authoritative** pattern.
+
+---
+
+## Frontend Architecture
+
+### Router — [App.tsx](file:///media/rumon/PLANT/nivrosys/scoreboard/frontend/src/App.tsx)
+
+Custom path-based routing (no react-router):
+
+| Path                       | Component                  | Description                   |
+| -------------------------- | -------------------------- | ----------------------------- |
+| `/` or `/live`             | `LivePage`                 | Public scoreboard viewer      |
+| `/admin` or `/admin/login` | `AdminLoginPage`           | Admin login form              |
+| `/admin/dashboard`         | `AdminMatchBrowserPage`    | Match list + create new match |
+| `/admin/controller`        | `AdminMatchControllerPage` | Score control panel per match |
+| _(fallback)_               | `LivePage`                 | Default to live view          |
+
+Navigation uses `window.history.pushState()` + a custom `popstate` event dispatcher in [navigation.ts](file:///media/rumon/PLANT/nivrosys/scoreboard/frontend/src/lib/navigation.ts).
+
+---
+
+### State Management — [useScoreboardStore.ts](file:///media/rumon/PLANT/nivrosys/scoreboard/frontend/src/store/useScoreboardStore.ts)
+
+Zustand store with three pieces of state:
+
+```typescript
+{
+  connected: boolean; // Socket.IO connection status
+  lastEvent: string; // Last status message
+  scoreboard: ScoreboardState; // Current match state
+}
+```
+
+Updated via the `useSocketScoreboard` hook whenever Socket.IO pushes new data.
+
+---
+
+### Real-Time Hook — [useSocketScoreboard.ts](file:///media/rumon/PLANT/nivrosys/scoreboard/frontend/src/hooks/useSocketScoreboard.ts)
+
+Lifecycle:
+
+1. Sets `socket.auth = { roomId }` (tells server which room to join)
+2. Calls `socket.connect()`
+3. Listens for `connect`, `disconnect`, `scoreboard:state`, `scoreboard:message`
+4. Updates Zustand store on each event
+5. Cleans up listeners and disconnects on unmount or `roomId` change
+
+---
+
+### REST API Client — [api.ts](file:///media/rumon/PLANT/nivrosys/scoreboard/frontend/src/lib/api.ts)
+
+Typed fetch wrappers for all backend endpoints:
+
+| Function                             | Endpoint                       | Auth |
+| ------------------------------------ | ------------------------------ | ---- |
+| `loginAdmin(email, password)`        | `POST /auth/login`             | ❌   |
+| `listMatches()`                      | `GET /matches`                 | ❌   |
+| `getMatch(roomId)`                   | `GET /matches/:roomId`         | ❌   |
+| `createMatch(data, token)`           | `POST /matches`                | ✅   |
+| `updateScore(action, token, roomId)` | `POST /scoreboard/update`      | ✅   |
+| `updateSettings(settings, token)`    | `POST /scoreboard/settings`    | ✅   |
+| `finishMatch(roomId, token)`         | `POST /matches/:roomId/finish` | ✅   |
+| `deleteMatch(roomId, token)`         | `DELETE /matches/:roomId`      | ✅   |
+
+---
+
+### Admin Session — [adminSession.ts](file:///media/rumon/PLANT/nivrosys/scoreboard/frontend/src/lib/adminSession.ts)
+
+Simple `localStorage` wrapper:
+
+- `getAdminToken()` — read JWT from storage
+- `setAdminToken(token)` — persist after login
+- `clearAdminToken()` — remove on logout or token expiry
+
+---
+
+### Pages Breakdown
+
+#### [LivePage.tsx](file:///media/rumon/PLANT/nivrosys/scoreboard/frontend/src/pages/LivePage.tsx)
+
+- **Public view** — no authentication required
+- Reads `?roomId=` from URL query string
+- Connects to Socket.IO for real-time state
+- Shows `ScoreboardView` component with live scores
+- Sidebar lists all available matches (fetched via REST + refreshed via `matches:updated` Socket.IO event)
+- Respects `liveEnabled` toggle — shows "hidden" message when disabled
+
+#### [AdminLoginPage.tsx](file:///media/rumon/PLANT/nivrosys/scoreboard/frontend/src/pages/AdminLoginPage.tsx)
+
+- Email + password form
+- Calls `POST /auth/login`
+- Stores JWT in localStorage
+- Redirects to `/admin/dashboard` on success
+- Auto-redirects if already logged in
+
+#### [AdminMatchBrowserPage.tsx](file:///media/rumon/PLANT/nivrosys/scoreboard/frontend/src/pages/AdminMatchBrowserPage.tsx)
+
+- **Match management hub** — create, browse, delete matches
+- Create form with: match name, sport (football/cricket), home/away teams, live toggle
+- Matches displayed in 4 paginated groups: ongoing football, ongoing cricket, previous football, previous cricket
+- Each match card has "Open" (→ controller) and "Delete" actions
+- Real-time refresh via `matches:updated` Socket.IO event
+
+#### [AdminMatchControllerPage.tsx](file:///media/rumon/PLANT/nivrosys/scoreboard/frontend/src/pages/AdminMatchControllerPage.tsx)
+
+- **Score control panel** for a specific match
+- Football mode: +1 / -1 buttons per team
+- Cricket mode: 9-button grid per team (Dot, +1, +2, +3, +4, +6, Wicket, No Ball, Wide)
+- Toggle live visibility, reset scores, end match
+- Connected to Socket.IO for immediate feedback after each action
+
+#### Legacy Pages (not routed but still in codebase)
+
+- [AdminPage.tsx](file:///media/rumon/PLANT/nivrosys/scoreboard/frontend/src/pages/AdminPage.tsx) — original single-match admin with inline login
+- [AdminDashboardPage.tsx](file:///media/rumon/PLANT/nivrosys/scoreboard/frontend/src/pages/AdminDashboardPage.tsx) — combined browser + controller in one page
+
+---
+
+## Database Schema
+
+### `matches` Collection (Primary)
+
+```typescript
+{
+  _id: string;          // === roomId (e.g. "weekend-final-a1b2c3d4")
+  roomId: string;       // duplicated for convenience
+  matchName: string;    // "Weekend Final"
+  status: "live" | "finished";
+  state: ScoreboardState;  // full nested state object
+  createdAt: string;    // ISO timestamp
+  updatedAt: string;    // ISO timestamp
+  finishedAt?: string;  // ISO timestamp (set when finished)
+}
+```
+
+### `scoreboard_state` Collection (Legacy)
+
+```typescript
+{
+  _id: "current";
+  state: ScoreboardState;
+}
+```
+
+---
+
+## Environment Configuration
+
+### Backend (`.env`)
+
+| Variable         | Default                  | Purpose                         |
+| ---------------- | ------------------------ | ------------------------------- |
+| `PORT`           | `4000`                   | Server port                     |
+| `CLIENT_ORIGIN`  | `http://localhost:5173`  | CORS origin for frontend        |
+| `MONGODB_URI`    | _(required)_             | MongoDB Atlas connection string |
+| `ADMIN_EMAIL`    | `rumon@mail.com`         | Admin login email               |
+| `ADMIN_PASSWORD` | `00000000`               | Admin login password            |
+| `JWT_SECRET`     | `change-this-jwt-secret` | JWT signing secret              |
+| `JWT_EXPIRES_IN` | `1d`                     | Token expiration duration       |
+
+### Frontend (`.env`)
+
+| Variable          | Default                 | Purpose              |
+| ----------------- | ----------------------- | -------------------- |
+| `VITE_SOCKET_URL` | `http://localhost:4000` | Socket.IO server URL |
+| `VITE_API_URL`    | `http://localhost:4000` | REST API base URL    |
+
+---
+
+## Key Design Patterns
+
+### 1. Server-Authoritative Updates
+
+Admin sends score changes via REST → server applies the action → broadcasts to all connected clients via Socket.IO. No client-side score mutation happens directly.
+
+### 2. Reducer Pattern (Pure Functions)
+
+`scoreboardState.ts` is a pure reducer with no side effects. `applyScoreActionToState(state, action)` takes old state + action, returns new state. This makes the logic testable and predictable.
+
+### 3. Get-or-Create Pattern
+
+`getOrCreateMatch(roomId)` ensures a match always exists. If a viewer visits a room that doesn't exist yet, a default match is auto-created.
+
+### 4. Callback-Based Decoupling
+
+The Express app doesn't know about Socket.IO. It receives `onMatchUpdated` and `onMatchesChanged` callbacks from the entry point, keeping the REST layer clean and testable independently.
+
+### 5. Room-Based Broadcasting
+
+Socket.IO rooms map 1:1 to match rooms. When a score updates for room `weekend-final-abc`, only clients subscribed to that room receive the update.
+
+---
+
+## Sports Supported
+
+### Football
+
+- Simple +1 / -1 score per team
+- Reset to 0-0
+
+### Cricket
+
+- Full delivery tracking: Dot, 1-6 runs, Wicket, No Ball, Wide
+- Automatic over counting (6 legal balls = 1 over)
+- No balls and wides don't count as legal deliveries but add 1 run
+- Wickets capped at 10 per team
+- Over history tracking with ball-by-ball record
+- Current over display (e.g. `1 - 4 - W - 0 - 2 - 6`)
